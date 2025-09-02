@@ -65,48 +65,35 @@ This script will load the raw Europarl dataset, normalize the text, build vocabu
 
 ```bash
 python -m src.data_preprocessing
-Step 2: Train the Model
+```
+
+### Step 2: Train the Model
+
 This command starts the training process. The script will automatically detect if a GPU is available. The best performing model (based on validation loss) will be saved to saved_models/best-nmt-model.pt.
-code
-Bash
+
+```bash
 python -m src.train
+```
+
 You will see a progress bar for each epoch, showing the training loss, speed, and ETA.
-Step 3: Evaluate the Model on the Test Set
+
+### Step 3: Evaluate the Model on the Test Set
 After training is complete, run this script to evaluate the best model on the unseen test set. It will report the final Loss, Perplexity, and BLEU score.
-code
-Bash
+
+```bash
 python -m src.test
+```
+
 The script will also print a few example translations for a qualitative check.
-Step 4: Translate a New Sentence
+
+### Step 4: Translate a New Sentence
 Use the translate.py script to perform inference on a single Spanish sentence.
-code
-Bash
+
+```bash
 python -m src.translate "este es un ejemplo de una frase en español"
+```
+
 Example Output:
-code
 Original (es): este es un ejemplo de una frase en español
 Translated (en): this is an example of a sentence in spanish
-Running on Google Colab
-This project is well-suited for Google Colab's free T4 GPU.
-Prepare: Compress the entire NMT project folder into a NMT.zip file.
-Setup Notebook: In a new Colab notebook, set the runtime to T4 GPU (Runtime -> Change runtime type).
-Upload and Unzip: Use the following code in a cell to upload and extract your project.
-code
-Python
-from google.colab import files
-uploaded = files.upload() # Upload NMT.zip
-!unzip NMT.zip
-Install and Run: Navigate into the project directory and run the commands as described in the "Usage" section.
-code
-Python
-import os
-os.chdir('NMT')
 
-# Install dependencies
-!pip install -r requirements.txt
-
-# Run the pipeline
-!python src/data_preprocessing.py
-!python src/train.py
-!python src/test.py
-!python src/translate.py "hola mundo"
