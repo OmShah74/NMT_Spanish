@@ -1,12 +1,13 @@
+# src/dataset.py
+
 import torch
 from torch.utils.data import Dataset, DataLoader
 from torch.nn.utils.rnn import pad_sequence
 import pickle
 import pandas as pd
-import config # Import config to get PAD_IDX
+# No need to import config here, pad_idx is passed directly
 
-# The Vocabulary class is defined directly in this file.
-# No import is needed.
+# This is the single, canonical definition of the Vocabulary class.
 class Vocabulary:
     def __init__(self, name):
         self.name = name
@@ -43,7 +44,7 @@ class NMTDataset(Dataset):
         target_sentence = self.df.iloc[index]['english_normalized']
 
         source_tensor, source_len = self.numericalize(source_sentence, self.source_vocab)
-        target_tensor, _ = self.numericalize(target_sentence, self.target_vocab) # We don't need target length
+        target_tensor, _ = self.numericalize(target_sentence, self.target_vocab)
 
         return source_tensor, source_len, target_tensor
     
@@ -57,12 +58,6 @@ class NMTDataset(Dataset):
         return torch.tensor(tokens), len(tokens)
 
 class Collate:
-    """
-    A collate function to process a batch of samples:
-    1. Separates source and target sentences.
-    2. Pads them to the same length.
-    3. Returns padded tensors and a tensor of source lengths.
-    """
     def __init__(self, pad_idx):
         self.pad_idx = pad_idx
 
@@ -71,15 +66,13 @@ class Collate:
         source_lengths = torch.tensor([item[1] for item in batch], dtype=torch.int64)
         target_tensors = [item[2] for item in batch]
 
+        # batch_first=False is the expected format for our model
         padded_sources = pad_sequence(source_tensors, batch_first=False, padding_value=self.pad_idx)
         padded_targets = pad_sequence(target_tensors, batch_first=False, padding_value=self.pad_idx)
 
         return padded_sources, source_lengths, padded_targets
 
 def get_loader(df_path, source_vocab_path, target_vocab_path, batch_size, pad_idx, shuffle=True):
-    """
-    Creates and returns a DataLoader.
-    """
     df = pd.read_pickle(df_path)
     with open(source_vocab_path, 'rb') as f:
         source_vocab = pickle.load(f)
@@ -91,7 +84,7 @@ def get_loader(df_path, source_vocab_path, target_vocab_path, batch_size, pad_id
     loader = DataLoader(
         dataset=dataset,
         batch_size=batch_size,
-        shuffle=shuffle, # Allow disabling shuffle for validation/test
+        shuffle=shuffle,
         collate_fn=Collate(pad_idx=pad_idx)
     )
     

@@ -1,19 +1,18 @@
+# src/data_preprocessing.py
+
 import pandas as pd
 import re
 import os
 import pickle
 from sklearn.model_selection import train_test_split
 
-# === CHANGED SECTION START ===
-# REMOVE the old Vocabulary class definition from this file.
-# IMPORT it from dataset.py, which is now the single source of truth.
-from dataset import Vocabulary
-# === CHANGED SECTION END ===
-
+# Import the single source of truth for Vocabulary from dataset.py
+from .dataset import Vocabulary 
+# Import paths from the centralized config file
+from . import config
 
 # --- Data Loading and Normalization ---
 def load_data(raw_data_dir):
-    """Loads the Spanish and English sentence pairs from the raw data directory."""
     spanish_file_path = os.path.join(raw_data_dir, 'europarl-v7.es-en.es')
     english_file_path = os.path.join(raw_data_dir, 'europarl-v7.es-en.en')
 
@@ -33,24 +32,20 @@ def load_data(raw_data_dir):
     return df
 
 def normalize_text(text):
-    """Performs text normalization steps on a single sentence."""
-    text = text.lower()
-    text = re.sub(r'([?.!,])', r' \1 ', text)
-    text = re.sub(r'[^a-z?.!,]+', ' ', text)
-    text = re.sub(r'\s+', ' ', text).strip()
+    text = text.lower().strip()
+    text = re.sub(r"([?.!,¿])", r" \1 ", text)
+    text = re.sub(r'[" "]+', " ", text)
+    text = re.sub(r"[^a-zA-Z?.!,¿]+", " ", text)
+    text = text.strip()
     return text
 
 def main():
-    """Main function to execute the full preprocessing pipeline."""
-    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    raw_data_path = os.path.join(project_root, 'data', 'raw')
-    processed_data_path = os.path.join(project_root, 'data', 'processed')
-    os.makedirs(processed_data_path, exist_ok=True)
+    os.makedirs(config.PROCESSED_DATA_DIR, exist_ok=True)
 
     try:
-        df = load_data(raw_data_path)
+        df = load_data(config.RAW_DATA_DIR)
     except FileNotFoundError:
-        print("Error: Raw data files not found in 'data/raw/'.")
+        print(f"Error: Raw data files not found in '{config.RAW_DATA_DIR}'.")
         return
 
     print("\nNormalizing text data...")
@@ -58,10 +53,10 @@ def main():
     df['english_normalized'] = df['english'].apply(normalize_text)
     print("Normalization complete.")
     
-    df = df[(df['spanish_normalized'] != '') & (df['english_normalized'] != '')]
-    df = df.dropna().reset_index(drop=True)
+    df = df[(df['spanish_normalized'] != '') & (df['english_normalized'] != '')].dropna().reset_index(drop=True)
     print(f"Dataframe shape after cleaning: {df.shape}")
 
+    # Use a subset for faster processing. Increase this number for better results.
     df = df.head(100000)
     print(f"\nUsing a subset of {len(df)} sentences for processing.")
     
@@ -86,23 +81,19 @@ def main():
     
     print("\nSaving data splits and vocabularies...")
     
-    train_df.to_pickle(os.path.join(processed_data_path, 'train_df.pkl'))
-    val_df.to_pickle(os.path.join(processed_data_path, 'val_df.pkl'))
-    test_df.to_pickle(os.path.join(processed_data_path, 'test_df.pkl'))
-    print("Saved DataFrame splits to 'data/processed/'.")
+    train_df.to_pickle(config.TRAIN_DF_PATH)
+    val_df.to_pickle(config.VAL_DF_PATH)
+    test_df.to_pickle(config.TEST_DF_PATH)
+    print(f"Saved DataFrame splits to '{config.PROCESSED_DATA_DIR}'.")
 
-    with open(os.path.join(processed_data_path, 'vocab_es.pkl'), 'wb') as f:
+    with open(config.VOCAB_ES_PATH, 'wb') as f:
         pickle.dump(spanish_vocab, f)
-    with open(os.path.join(processed_data_path, 'vocab_en.pkl'), 'wb') as f:
+    with open(config.VOCAB_EN_PATH, 'wb') as f:
         pickle.dump(english_vocab, f)
-    print("Saved vocabularies to 'data/processed/'.")
+    print(f"Saved vocabularies to '{config.PROCESSED_DATA_DIR}'.")
 
     print("\n--- Preprocessing Finished Successfully! ---")
-    print("Next step: Run train.py")
+    print("Next step: Run src/train.py")
 
 if __name__ == '__main__':
-    # Since we are running this from the /content/NMT/src directory,
-    # we need to add 'src' to the path so it can find the 'dataset' module.
-    import sys
-    sys.path.insert(0, os.path.abspath('.'))
     main()

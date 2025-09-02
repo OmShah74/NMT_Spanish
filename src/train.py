@@ -1,60 +1,78 @@
+# src/train.py
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
 import time
 import math
 import os
+import contextlib
+from tqdm import tqdm # Import tqdm
 
 # Import our custom modules
-import config
-# === CHANGED LINE START ===
-# Explicitly import Vocabulary alongside get_loader
-from dataset import get_loader, Vocabulary
-# === CHANGED LINE END ===
-from model import create_model
+from . import config
+from .dataset import get_loader
+from .model import create_model
 
-# Import for Automatic Mixed Precision (AMP)
-from torch.cuda.amp import GradScaler, autocast
-
-def train(model, iterator, optimizer, criterion, clip, scaler):
-    """Performs one epoch of training using mixed precision."""
+def train(model, iterator, optimizer, criterion, clip, scaler, epoch):
+    """
+    Performs one epoch of training with a progress bar.
+    """
     model.train()
     epoch_loss = 0
     
-    for i, batch in enumerate(iterator):
+    ctx = torch.amp.autocast(device_type=config.DEVICE, dtype=torch.float16) if scaler else contextlib.nullcontext()
+
+    # Wrap the iterator with tqdm for a progress bar
+    progress_bar = tqdm(iterator, desc=f"Training Epoch {epoch+1}/{config.NUM_EPOCHS}", leave=True)
+
+    for i, batch in enumerate(progress_bar):
         src, src_len, trg = batch
         src, trg = src.to(config.DEVICE), trg.to(config.DEVICE)
         
         optimizer.zero_grad()
         
-        with autocast():
+        with ctx:
             output = model(src, src_len, trg)
             output_dim = output.shape[-1]
             output_reshaped = output[1:].view(-1, output_dim)
             trg_reshaped = trg[1:].view(-1)
             loss = criterion(output_reshaped, trg_reshaped)
         
-        scaler.scale(loss).backward()
-        scaler.unscale_(optimizer)
-        torch.nn.utils.clip_grad_norm_(model.parameters(), clip)
-        scaler.step(optimizer)
-        scaler.update()
+        if scaler:
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), clip)
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), clip)
+            optimizer.step()
         
         epoch_loss += loss.item()
         
+        # Update the progress bar with the current loss
+        progress_bar.set_postfix(loss=loss.item())
+        
     return epoch_loss / len(iterator)
 
-def evaluate(model, iterator, criterion):
-    """Evaluates the model on the validation set."""
+def evaluate(model, iterator, criterion, epoch):
+    """Evaluates the model on the validation set with a progress bar."""
     model.eval()
     epoch_loss = 0
     
+    ctx = torch.amp.autocast(device_type=config.DEVICE, dtype=torch.float16) if config.DEVICE == 'cuda' else contextlib.nullcontext()
+
+    # Wrap the iterator with tqdm
+    progress_bar = tqdm(iterator, desc=f"Validating Epoch {epoch+1}/{config.NUM_EPOCHS}", leave=True)
+    
     with torch.no_grad():
-        for i, batch in enumerate(iterator):
+        for i, batch in enumerate(progress_bar):
             src, src_len, trg = batch
             src, trg = src.to(config.DEVICE), trg.to(config.DEVICE)
 
-            with autocast():
+            with ctx:
                 output = model(src, src_len, trg, teacher_forcing_ratio=0) 
                 output_dim = output.shape[-1]
                 output = output[1:].view(-1, output_dim)
@@ -62,18 +80,17 @@ def evaluate(model, iterator, criterion):
                 loss = criterion(output, trg)
 
             epoch_loss += loss.item()
+            progress_bar.set_postfix(loss=loss.item())
             
     return epoch_loss / len(iterator)
 
 def epoch_time(start_time, end_time):
-    """Calculates the time taken for an epoch."""
     elapsed_time = end_time - start_time
     elapsed_mins = int(elapsed_time / 60)
     elapsed_secs = int(elapsed_time - (elapsed_mins * 60))
     return elapsed_mins, elapsed_secs
 
 def main():
-    """Main function to start the training process."""
     print("Loading data...")
     train_loader, es_vocab, en_vocab = get_loader(
         df_path=config.TRAIN_DF_PATH,
@@ -103,16 +120,21 @@ def main():
     optimizer = optim.Adam(model.parameters(), lr=config.LEARNING_RATE)
     criterion = nn.CrossEntropyLoss(ignore_index=config.PAD_IDX)
     
-    scaler = GradScaler()
+    scaler = torch.amp.GradScaler('cuda') if config.DEVICE == 'cuda' else None
+    
+    if scaler:
+        print("Automatic Mixed Precision (AMP) enabled.")
+    else:
+        print("Running on CPU. Automatic Mixed Precision (AMP) is disabled.")
+
     best_valid_loss = float('inf')
-    CLIP = 1
 
     print("\nStarting training...")
     for epoch in range(config.NUM_EPOCHS):
         start_time = time.time()
         
-        train_loss = train(model, train_loader, optimizer, criterion, CLIP, scaler)
-        valid_loss = evaluate(model, val_loader, criterion)
+        train_loss = train(model, train_loader, optimizer, criterion, config.CLIP, scaler, epoch)
+        valid_loss = evaluate(model, val_loader, criterion, epoch)
         
         end_time = time.time()
         
@@ -121,14 +143,13 @@ def main():
         if valid_loss < best_valid_loss:
             best_valid_loss = valid_loss
             os.makedirs(config.SAVED_MODELS_DIR, exist_ok=True)
-            model_path = os.path.join(config.SAVED_MODELS_DIR, 'best-nmt-model.pt')
-            torch.save(model.state_dict(), model_path)
+            torch.save(model.state_dict(), config.BEST_MODEL_PATH)
         
         print(f'Epoch: {epoch+1:02} | Time: {epoch_mins}m {epoch_secs}s')
         print(f'\tTrain Loss: {train_loss:.3f} | Train PPL: {math.exp(train_loss):7.3f}')
         print(f'\t Val. Loss: {valid_loss:.3f} |  Val. PPL: {math.exp(valid_loss):7.3f}')
         
-    print("\nTraining finished.")
+    print(f"\nTraining finished. Best model saved to {config.BEST_MODEL_PATH}")
 
 if __name__ == '__main__':
     main()
