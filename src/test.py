@@ -4,6 +4,7 @@ import torch
 import torch.nn as nn
 from tqdm import tqdm
 import pickle
+from nltk.translate.bleu_score import sentence_bleu, corpus_bleu
 import random
 
 # Import custom modules
@@ -12,7 +13,7 @@ from .model import create_model
 from .dataset import get_loader, Vocabulary
 
 # Import the BLEU score metric from torchtext
-from torchtext.data.metrics import bleu_score
+
 
 def test_model(model, iterator, criterion, en_vocab):
     """
@@ -76,7 +77,7 @@ def test_model(model, iterator, criterion, en_vocab):
     perplexity = torch.exp(torch.tensor(final_loss))
     
     # Calculate BLEU score (multiplied by 100 for readability)
-    bleu = bleu_score(generated_corpus, targets_corpus) * 100
+    bleu = corpus_bleu(targets_corpus, generated_corpus) * 100
 
     # Print some example translations
     print("\n--- Example Translations ---")
