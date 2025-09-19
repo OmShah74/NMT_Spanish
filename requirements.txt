@@ -3,3 +3,5 @@ pandas
 scikit-learn
 tqdm
 torchtext
+spacy
+sentencepiece

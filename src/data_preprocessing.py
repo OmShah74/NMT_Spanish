@@ -1,99 +1,102 @@
 # src/data_preprocessing.py
 
 import pandas as pd
-import re
 import os
-import pickle
 from sklearn.model_selection import train_test_split
+import spacy
+import sentencepiece as spm
+from tqdm import tqdm
 
-# Import the single source of truth for Vocabulary from dataset.py
-from .dataset import Vocabulary 
-# Import paths from the centralized config file
 from . import config
 
-# --- Data Loading and Normalization ---
-def load_data(raw_data_dir):
-    spanish_file_path = os.path.join(raw_data_dir, 'europarl-v7.es-en.es')
-    english_file_path = os.path.join(raw_data_dir, 'europarl-v7.es-en.en')
+# --- 1. Linguistic Preprocessing with spaCy ---
+def preprocess_with_spacy(sentences, spacy_model):
+    """
+    Performs lemmatization and basic cleaning on a list of sentences.
+    """
+    processed_sentences = []
+    for doc in tqdm(spacy_model.pipe(sentences), total=len(sentences), desc="Lemmatizing"):
+        lemmas = [token.lemma_.lower() for token in doc if not token.is_punct and not token.is_space]
+        processed_sentences.append(" ".join(lemmas))
+    return processed_sentences
 
-    print("Loading Spanish data from:", spanish_file_path)
-    with open(spanish_file_path, 'r', encoding='utf-8') as f:
-        spanish_sentences = f.readlines()
-
-    print("Loading English data from:", english_file_path)
-    with open(english_file_path, 'r', encoding='utf-8') as f:
-        english_sentences = f.readlines()
-
-    if len(spanish_sentences) != len(english_sentences):
-        raise ValueError("The Spanish and English files do not have the same number of lines.")
-
-    df = pd.DataFrame({'spanish': spanish_sentences, 'english': english_sentences})
-    print(f"Successfully loaded {len(df)} sentence pairs.")
-    return df
-
-def normalize_text(text):
-    text = text.lower().strip()
-    text = re.sub(r"([?.!,¿])", r" \1 ", text)
-    text = re.sub(r'[" "]+', " ", text)
-    text = re.sub(r"[^a-zA-Z?.!,¿]+", " ", text)
-    text = text.strip()
-    return text
+# --- 2. Train SentencePiece Model (NEW ROBUST VERSION) ---
+def train_sentencepiece_model(text_file_path, model_path_prefix, vocab_size):
+    """
+    Trains a SentencePiece model using a dictionary of arguments to avoid path issues.
+    """
+    print(f"Training SentencePiece model from {text_file_path}...")
+    
+    # --- THIS IS THE NEW, CORRECTED METHOD ---
+    # We pass arguments as a dictionary, which is safer than a command string.
+    # This completely avoids any issues with spaces in file paths.
+    spm.SentencePieceTrainer.train(
+        input=text_file_path,
+        model_prefix=model_path_prefix,
+        vocab_size=vocab_size,
+        character_coverage=1.0,
+        model_type='bpe',
+        pad_id=config.PAD_IDX,
+        unk_id=config.UNK_IDX,
+        bos_id=config.SOS_IDX,
+        eos_id=config.EOS_IDX
+    )
+    print(f"SentencePiece model saved to {model_path_prefix}.model")
 
 def main():
     os.makedirs(config.PROCESSED_DATA_DIR, exist_ok=True)
 
-    try:
-        df = load_data(config.RAW_DATA_DIR)
-    except FileNotFoundError:
-        print(f"Error: Raw data files not found in '{config.RAW_DATA_DIR}'.")
-        return
-
-    print("\nNormalizing text data...")
-    df['spanish_normalized'] = df['spanish'].apply(normalize_text)
-    df['english_normalized'] = df['english'].apply(normalize_text)
-    print("Normalization complete.")
+    # --- Load Raw Data ---
+    spanish_file = os.path.join(config.RAW_DATA_DIR, 'europarl-v7.es-en.es')
+    english_file = os.path.join(config.RAW_DATA_DIR, 'europarl-v7.es-en.en')
+    with open(spanish_file, 'r', encoding='utf-8') as f: es_sents = f.readlines()
+    with open(english_file, 'r', encoding='utf-8') as f: en_sents = f.readlines()
     
-    df = df[(df['spanish_normalized'] != '') & (df['english_normalized'] != '')].dropna().reset_index(drop=True)
-    print(f"Dataframe shape after cleaning: {df.shape}")
+    df = pd.DataFrame({'spanish': es_sents, 'english': en_sents})
+    df = df.head(500000)
+    print(f"Loaded {len(df)} raw sentence pairs.")
 
-    # Use a subset for faster processing. Increase this number for better results.
-    df = df.head(100000)
-    print(f"\nUsing a subset of {len(df)} sentences for processing.")
+    # --- Linguistic Preprocessing ---
+    print("\nLoading spaCy models...")
+    nlp_es = spacy.load('es_core_news_sm', disable=['parser', 'ner'])
+    nlp_en = spacy.load('en_core_web_sm', disable=['parser', 'ner'])
+
+    df['spanish_processed'] = preprocess_with_spacy(df['spanish'].tolist(), nlp_es)
+    df['english_processed'] = preprocess_with_spacy(df['english'].tolist(), nlp_en)
     
-    train_df, test_val_df = train_test_split(df, test_size=0.2, random_state=42)
+    # --- Data Filtering ---
+    df = df[(df['spanish_processed'] != '') & (df['english_processed'] != '')].dropna().reset_index(drop=True)
+    df['es_len'] = df['spanish_processed'].str.split().str.len()
+    df['en_len'] = df['english_processed'].str.split().str.len()
+    
+    df = df[(df['es_len'] < 100) & (df['en_len'] < 100)]
+    df = df[(df['es_len'] / df['en_len'] < 1.5)]
+    df = df[(df['en_len'] / df['es_len'] < 1.5)]
+    print(f"Dataframe shape after cleaning and filtering: {df.shape}")
+
+    # --- Data Splitting ---
+    train_df, test_val_df = train_test_split(df, test_size=0.1, random_state=42)
     val_df, test_df = train_test_split(test_val_df, test_size=0.5, random_state=42)
+    print(f"Training set: {len(train_df)}, Validation set: {len(val_df)}, Test set: {len(test_df)}")
 
-    print(f"Training set size: {len(train_df)}")
-    print(f"Validation set size: {len(val_df)}")
-    print(f"Test set size: {len(test_df)}")
+    # --- Train SentencePiece Tokenizers (on training data only) ---
+    train_df['spanish_processed'].to_csv(config.SP_TRAIN_TEXT_ES, header=False, index=False)
+    train_df['english_processed'].to_csv(config.SP_TRAIN_TEXT_EN, header=False, index=False)
 
-    print("\nBuilding vocabularies from the training data...")
-    spanish_vocab = Vocabulary("spanish")
-    english_vocab = Vocabulary("english")
-
-    for sentence in train_df['spanish_normalized']:
-        spanish_vocab.add_sentence(sentence)
-    for sentence in train_df['english_normalized']:
-        english_vocab.add_sentence(sentence)
-
-    print(f"Spanish vocabulary size: {spanish_vocab.n_words}")
-    print(f"English vocabulary size: {english_vocab.n_words}")
+    train_sentencepiece_model(config.SP_TRAIN_TEXT_ES, config.SP_MODEL_PATH_ES.replace('.model', ''), config.VOCAB_SIZE)
+    train_sentencepiece_model(config.SP_TRAIN_TEXT_EN, config.SP_MODEL_PATH_EN.replace('.model', ''), config.VOCAB_SIZE)
     
-    print("\nSaving data splits and vocabularies...")
-    
+    # --- Save Final DataFrames ---
     train_df.to_pickle(config.TRAIN_DF_PATH)
     val_df.to_pickle(config.VAL_DF_PATH)
     test_df.to_pickle(config.TEST_DF_PATH)
-    print(f"Saved DataFrame splits to '{config.PROCESSED_DATA_DIR}'.")
+    print(f"\nProcessed DataFrame splits saved to '{config.PROCESSED_DATA_DIR}'.")
+    
+    # Clean up temporary text files
+    os.remove(config.SP_TRAIN_TEXT_ES)
+    os.remove(config.SP_TRAIN_TEXT_EN)
 
-    with open(config.VOCAB_ES_PATH, 'wb') as f:
-        pickle.dump(spanish_vocab, f)
-    with open(config.VOCAB_EN_PATH, 'wb') as f:
-        pickle.dump(english_vocab, f)
-    print(f"Saved vocabularies to '{config.PROCESSED_DATA_DIR}'.")
-
-    print("\n--- Preprocessing Finished Successfully! ---")
-    print("Next step: Run src/train.py")
+    print("\n--- Advanced Preprocessing Finished Successfully! ---")
 
 if __name__ == '__main__':
     main()
