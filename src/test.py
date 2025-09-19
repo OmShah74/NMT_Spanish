@@ -1,7 +1,9 @@
+# src/test.py
+
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from tqdm import tqdm
-import pickle
 import random
 from nltk.translate.bleu_score import corpus_bleu
 
@@ -9,27 +11,51 @@ from . import config
 from .model import create_model, generate_square_subsequent_mask
 from .dataset import get_loader
 
-# Auto-regressive decoding function for evaluation
-def greedy_decode(model, src, max_len, start_symbol_idx, device):
+# --- ADDED: The same beam_search_decode function ---
+def beam_search_decode(model, src, max_len, start_symbol_idx, device, beam_size):
+    model.eval()
     src = src.to(device)
+    
     src_mask = (torch.zeros(src.shape[0], src.shape[0])).type(torch.bool).to(device)
     memory = model.encode(src, src_mask)
-    
-    ys = torch.ones(1, 1).fill_(start_symbol_idx).type(torch.long).to(device)
-    
-    for i in range(max_len - 1):
-        memory = memory.to(device)
-        tgt_mask = (generate_square_subsequent_mask(ys.size(0), device)).to(device)
-        out = model.decode(ys, memory, tgt_mask)
-        out = out.transpose(0, 1)
-        prob = model.generator(out[:, -1])
-        _, next_word = torch.max(prob, dim=1)
-        next_word = next_word.item()
+    memory = memory.to(device)
 
-        ys = torch.cat([ys, torch.ones(1, 1).type_as(src.data).fill_(next_word)], dim=0)
-        if next_word == config.EOS_IDX: break
+    initial_seq = torch.ones(1, 1).fill_(start_symbol_idx).type(torch.long).to(device)
+    beam = [(initial_seq, 0.0)]
+    completed_hypotheses = []
+
+    for _ in range(max_len):
+        all_candidates = []
+        for seq, score in beam:
+            if seq[-1].item() == config.EOS_IDX:
+                completed_hypotheses.append((seq, score))
+                continue
             
-    return ys
+            tgt_mask = (generate_square_subsequent_mask(seq.size(0), device)).to(device)
+            out = model.decode(seq, memory, tgt_mask)
+            out = out.transpose(0, 1)
+            prob = model.generator(out[:, -1])
+            log_probs = F.log_softmax(prob, dim=-1)
+            
+            top_log_probs, top_indices = torch.topk(log_probs, beam_size, dim=-1)
+
+            for i in range(beam_size):
+                next_word_idx = top_indices[0][i].reshape(1, 1)
+                next_log_prob = top_log_probs[0][i].item()
+                new_seq = torch.cat([seq, next_word_idx], dim=0)
+                new_score = score + next_log_prob
+                all_candidates.append((new_seq, new_score))
+
+        ordered = sorted(all_candidates, key=lambda x: x[1], reverse=True)
+        beam = ordered[:beam_size]
+        
+        if not beam or len(completed_hypotheses) >= beam_size:
+            break
+            
+    completed_hypotheses.extend(beam)
+    best_hypothesis = sorted(completed_hypotheses, key=lambda x: x[1] / len(x[0]), reverse=True)
+    return best_hypothesis[0][0]
+
 
 def test_model(model, iterator, criterion, sp_model_en):
     model.eval()
@@ -42,19 +68,21 @@ def test_model(model, iterator, criterion, sp_model_en):
             src, _, trg = batch
             src, trg = src.to(config.DEVICE), trg.to(config.DEVICE)
             
-            for j in range(src.size(1)): # Iterate through batch dimension
+            for j in range(src.size(1)):
                 src_sentence = src[:, j].view(-1, 1)
                 trg_sentence_ids = trg[:, j]
 
-                translated_indices = greedy_decode(model, src_sentence, config.MAX_TRANSLATION_LEN, config.SOS_IDX, config.DEVICE)
+                # --- CHANGED LINE ---
+                # Call the beam search function for evaluation
+                translated_indices = beam_search_decode(
+                    model, src_sentence, config.MAX_TRANSLATION_LEN, 
+                    config.SOS_IDX, config.DEVICE, config.BEAM_SIZE
+                )
                 
-                # Decode generated IDs to subwords
-                pred_tokens = sp_model_en.decode_ids(translated_indices.flatten().tolist())
-                generated_corpus.append(pred_tokens.split())
+                pred_tokens = sp_model_en.decode_ids(translated_indices.flatten().tolist()).split()
+                generated_corpus.append(pred_tokens)
                 
-                # Decode target IDs to subwords for reference
                 trg_tokens = sp_model_en.decode_ids(trg_sentence_ids.tolist())
-                # Filter out special tokens for BLEU calculation
                 trg_tokens_filtered = [token for token in trg_tokens.split() if token not in ['<s>', '</s>', '<pad>']]
                 targets_corpus.append([trg_tokens_filtered])
 
@@ -69,13 +97,10 @@ def test_model(model, iterator, criterion, sp_model_en):
     return bleu
 
 def main():
-    print("--- Starting Final Evaluation on Test Set ---")
     test_loader, _, sp_model_en = get_loader(config.TEST_DF_PATH, config.SP_MODEL_PATH_ES, config.SP_MODEL_PATH_EN, config.BATCH_SIZE, config.PAD_IDX, shuffle=False)
     
     model = create_model(config.VOCAB_SIZE, config.VOCAB_SIZE, config, config.DEVICE)
-    print(f"Loading trained model weights from {config.BEST_MODEL_PATH}")
     model.load_state_dict(torch.load(config.BEST_MODEL_PATH, map_location=config.DEVICE))
-    
     criterion = nn.CrossEntropyLoss(ignore_index=config.PAD_IDX)
 
     test_bleu = test_model(model, test_loader, criterion, sp_model_en)
@@ -86,6 +111,95 @@ def main():
 
 if __name__ == '__main__':
     main()
+
+# import torch
+# import torch.nn as nn
+# from tqdm import tqdm
+# import pickle
+# import random
+# from nltk.translate.bleu_score import corpus_bleu
+
+# from . import config
+# from .model import create_model, generate_square_subsequent_mask
+# from .dataset import get_loader
+
+# # Auto-regressive decoding function for evaluation
+# def greedy_decode(model, src, max_len, start_symbol_idx, device):
+#     src = src.to(device)
+#     src_mask = (torch.zeros(src.shape[0], src.shape[0])).type(torch.bool).to(device)
+#     memory = model.encode(src, src_mask)
+    
+#     ys = torch.ones(1, 1).fill_(start_symbol_idx).type(torch.long).to(device)
+    
+#     for i in range(max_len - 1):
+#         memory = memory.to(device)
+#         tgt_mask = (generate_square_subsequent_mask(ys.size(0), device)).to(device)
+#         out = model.decode(ys, memory, tgt_mask)
+#         out = out.transpose(0, 1)
+#         prob = model.generator(out[:, -1])
+#         _, next_word = torch.max(prob, dim=1)
+#         next_word = next_word.item()
+
+#         ys = torch.cat([ys, torch.ones(1, 1).type_as(src.data).fill_(next_word)], dim=0)
+#         if next_word == config.EOS_IDX: break
+            
+#     return ys
+
+# def test_model(model, iterator, criterion, sp_model_en):
+#     model.eval()
+#     targets_corpus = []
+#     generated_corpus = []
+
+#     progress_bar = tqdm(iterator, desc="Testing Model", leave=True)
+#     with torch.no_grad():
+#         for i, batch in enumerate(progress_bar):
+#             src, _, trg = batch
+#             src, trg = src.to(config.DEVICE), trg.to(config.DEVICE)
+            
+#             for j in range(src.size(1)): # Iterate through batch dimension
+#                 src_sentence = src[:, j].view(-1, 1)
+#                 trg_sentence_ids = trg[:, j]
+
+#                 translated_indices = greedy_decode(model, src_sentence, config.MAX_TRANSLATION_LEN, config.SOS_IDX, config.DEVICE)
+                
+#                 # Decode generated IDs to subwords
+#                 pred_tokens = sp_model_en.decode_ids(translated_indices.flatten().tolist())
+#                 generated_corpus.append(pred_tokens.split())
+                
+#                 # Decode target IDs to subwords for reference
+#                 trg_tokens = sp_model_en.decode_ids(trg_sentence_ids.tolist())
+#                 # Filter out special tokens for BLEU calculation
+#                 trg_tokens_filtered = [token for token in trg_tokens.split() if token not in ['<s>', '</s>', '<pad>']]
+#                 targets_corpus.append([trg_tokens_filtered])
+
+#     bleu = corpus_bleu(targets_corpus, generated_corpus) * 100
+    
+#     print("\n--- Example Translations ---")
+#     for _ in range(3):
+#         idx = random.randint(0, len(generated_corpus) - 1)
+#         print(f"Reference : {' '.join(targets_corpus[idx][0])}")
+#         print(f"Generated : {' '.join(generated_corpus[idx])}\n")
+
+#     return bleu
+
+# def main():
+#     print("--- Starting Final Evaluation on Test Set ---")
+#     test_loader, _, sp_model_en = get_loader(config.TEST_DF_PATH, config.SP_MODEL_PATH_ES, config.SP_MODEL_PATH_EN, config.BATCH_SIZE, config.PAD_IDX, shuffle=False)
+    
+#     model = create_model(config.VOCAB_SIZE, config.VOCAB_SIZE, config, config.DEVICE)
+#     print(f"Loading trained model weights from {config.BEST_MODEL_PATH}")
+#     model.load_state_dict(torch.load(config.BEST_MODEL_PATH, map_location=config.DEVICE))
+    
+#     criterion = nn.CrossEntropyLoss(ignore_index=config.PAD_IDX)
+
+#     test_bleu = test_model(model, test_loader, criterion, sp_model_en)
+
+#     print("\n--- Test Set Performance ---")
+#     print(f"BLEU Score: {test_bleu:.2f}")
+#     print("----------------------------")
+
+# if __name__ == '__main__':
+#     main()
 
 
 

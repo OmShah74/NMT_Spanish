@@ -48,3 +48,4 @@ UNK_IDX = 3
 # --- For Inference ---
 BEST_MODEL_PATH = os.path.join(SAVED_MODELS_DIR, 'best-transformer-model.pt')
 MAX_TRANSLATION_LEN = 100 # Increased max length
+BEAM_SIZE = 3 # --- ADD THIS LINE --- The number of candidates to keep at each step
