@@ -27,7 +27,6 @@ class PositionalEncoding(nn.Module):
         return self.dropout(x)
 
 # --- 2. Token Embedding ---
-# A simple helper class to combine word embedding and scaling.
 class TokenEmbedding(nn.Module):
     def __init__(self, vocab_size: int, d_model: int):
         super(TokenEmbedding, self).__init__()
@@ -81,7 +80,6 @@ class Seq2SeqTransformer(nn.Module):
         return self.transformer.decoder(self.positional_encoding(self.tgt_tok_emb(tgt)), memory, tgt_mask)
 
 
-# --- Helper functions for creating masks ---
 def generate_square_subsequent_mask(sz: int, device: str) -> torch.Tensor:
     """Generates a mask to prevent the decoder from seeing future tokens."""
     mask = (torch.triu(torch.ones((sz, sz), device=device)) == 1).transpose(0, 1)
